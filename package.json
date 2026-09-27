@@ -1,7 +1,7 @@
 {
   "name": "llm-sizer",
   "version": "0.1.0",
-  "description": "Benchmark Apple Silicon memory bandwidth, disk speed, and MLX model inference performance to find the optimal LLM size",
+  "description": "Benchmark memory bandwidth, disk speed, and LLM inference performance (MLX on macOS, Transformers on Linux) to find the optimal model size",
   "type": "module",
   "main": "llm-sizer.js",
   "bin": {
@@ -17,10 +17,12 @@
   },
   "keywords": [
     "mlx",
+    "transformers",
     "benchmark",
     "apple-silicon",
     "llm",
     "mac",
+    "linux",
     "inference"
   ],
   "license": "MIT"

@@ -6,6 +6,11 @@ import { cpus, homedir, totalmem } from "node:os";
 import { createInterface } from "node:readline";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 
+if (process.platform === "win32") {
+	console.log("Not supported in Windows");
+	process.exit(1);
+}
+
 if (!isMainThread) {
 	const source = new Uint8Array(workerData.bytes), target = new Uint8Array(source.length);
 	parentPort.on("message", ({ copies }) => {
@@ -15,6 +20,8 @@ if (!isMainThread) {
 	});
 	parentPort.postMessage("ready");
 } else {
+const isMac = process.platform === "darwin";
+const isLinux = process.platform === "linux";
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 const ask = q => new Promise(res => {
 	if (rl.closed) return res("");
@@ -41,12 +48,22 @@ let python;
 for (const candidate of pythonCandidates) {
 	if (existsSync(candidate)) { python = candidate; break; }
 }
-let mlxInstalled = false;
+
+const backendName = isMac ? "mlx-lm" : "transformers & torch";
+const testCommand = isMac ? "import mlx_lm" : "import transformers, torch";
+const installPrompt = isMac
+	? "mlx-lm is not installed. Install mlx-lm? [y/N] "
+	: "transformers and torch are not installed. Install them? [y/N] ";
+const installPackages = isMac
+	? ["mlx-lm"]
+	: ["transformers", "torch", "accelerate"];
+
+let backendInstalled = false;
 if (python) {
-	mlxInstalled = (await spawnProc(python, ["-c", "import mlx_lm"], { stdio: "ignore" }).exited) === 0;
-	if (!mlxInstalled && /^y(es)?$/i.test(await ask("mlx-lm is not installed. Install mlx-lm? [y/N] ") ?? "")) {
-		const install = spawnProc(python, ["-m", "pip", "install", "--user", "--break-system-packages", "mlx-lm"]);
-		if (await install.exited === 0) mlxInstalled = (await spawnProc(python, ["-c", "import mlx_lm"], { stdio: "ignore" }).exited) === 0;
+	backendInstalled = (await spawnProc(python, ["-c", testCommand], { stdio: "ignore" }).exited) === 0;
+	if (!backendInstalled && /^y(es)?$/i.test(await ask(installPrompt) ?? "")) {
+		const install = spawnProc(python, ["-m", "pip", "install", "--user", "--break-system-packages", ...installPackages]);
+		if (await install.exited === 0) backendInstalled = (await spawnProc(python, ["-c", testCommand], { stdio: "ignore" }).exited) === 0;
 	}
 }
 
@@ -96,20 +113,34 @@ try {
 	await Promise.all(workers.map(w => w.terminate()));
 }
 
+let gpuInfo = "";
+let gpuMem = 0;
+if (!isMac && python) {
+	try {
+		const out = execSync(`${python} -c "import torch; print(f'{torch.cuda.get_device_name(0)}|{torch.cuda.get_device_properties(0).total_memory}') if torch.cuda.is_available() else print('')" 2>/dev/null`, { encoding: "utf8" }).trim();
+		if (out) {
+			const [name, mem] = out.split("|");
+			gpuMem = Number(mem) || 0;
+			gpuInfo = ` | GPU: ${name} (${(gpuMem / 1024 ** 3).toFixed(2)} GB VRAM)`;
+		}
+	} catch {}
+}
+
 console.log("\n========== SYSTEM PERFORMANCE ==========");
-console.log(`CPU: ${cpus()[0]?.model ?? "Unknown"} | RAM: ${(totalmem() / 1024 ** 3).toFixed(2)} GB | Mem: ${bandwidth.toFixed(2)} GB/s | Mem MT: ${multiBandwidth.toFixed(2)} GB/s | Disk: ${storage.toFixed(2)} GB/s`);
+console.log(`CPU: ${cpus()[0]?.model ?? "Unknown"} | RAM: ${(totalmem() / 1024 ** 3).toFixed(2)} GB${gpuInfo} | Mem: ${bandwidth.toFixed(2)} GB/s | Mem MT: ${multiBandwidth.toFixed(2)} GB/s | Disk: ${storage.toFixed(2)} GB/s`);
 console.log("========================================");
 console.log(`${python ? "✅" : "❌"} Python installed`);
-console.log(`${mlxInstalled ? "✅" : "❌"} mlx-lm installed`);
+console.log(`${backendInstalled ? "✅" : "❌"} ${backendName} installed`);
 
-if (!python || !mlxInstalled) {
-	console.error("\nPython 3 and mlx-lm are required to run model benchmarks.");
+if (!python || !backendInstalled) {
+	console.error(`\nPython 3 and ${backendName} are required to run model benchmarks.`);
 	rl.close();
 	process.exit(1);
 }
 
 const modelSize = name => {
 	if (/-vl\b|-vision\b|whisper/i.test(name)) return 0;
+	if (!isMac && /-(?:gguf|awq|gptq|exl2)\b/i.test(name)) return 0;
 	const p = name.match(/(\d+(?:\.\d+)?)\s*([bm])(?:-|$)/i);
 	const b = name.match(/(?:-|\b)(\d+)-?bit/i);
 	if (!p) return 0;
@@ -127,7 +158,9 @@ const confirmDiskSpace = async (directory, requiredBytes) => {
 };
 
 const localModels = [];
+const modelDownloadDir = isMac ? "/tmp/mlx-models" : "/tmp/llm-models";
 const roots = [
+	modelDownloadDir,
 	"/tmp/mlx-models",
 	`${homedir()}/.cache/huggingface/hub`,
 	`${homedir()}/models`,
@@ -152,10 +185,13 @@ const scan = async (directory, depth = 0) => {
 };
 for (const root of roots) await scan(root);
 
-const budget = totalmem() * 0.65;
+const budget = (gpuMem > 0 ? gpuMem : totalmem()) * 0.65;
 const candidates = localModels.filter(m => m.bytes <= budget);
+const hfApiUrl = isMac
+	? "https://huggingface.co/api/models?author=mlx-community&search=Instruct&sort=downloads&direction=-1&limit=100"
+	: "https://huggingface.co/api/models?pipeline_tag=text-generation&search=Instruct&sort=downloads&direction=-1&limit=100";
 try {
-	const response = await fetch("https://huggingface.co/api/models?author=mlx-community&search=Instruct&sort=downloads&direction=-1&limit=100", { signal: AbortSignal.timeout(8000) });
+	const response = await fetch(hfApiUrl, { signal: AbortSignal.timeout(8000) });
 	if (response.ok) {
 		for (const model of await response.json()) {
 			const bytes = modelSize(model.id);
@@ -177,7 +213,7 @@ for (;;) {
 
 	let selectedModel = model.local ? model.path : null;
 	if (!model.local) {
-		const modelPath = `/tmp/mlx-models/${model.name.replaceAll("/", "--")}`;
+		const modelPath = `${modelDownloadDir}/${model.name.replaceAll("/", "--")}`;
 		if (await confirmDiskSpace("/tmp", model.bytes * 1.1)) {
 			const folderSize = async dir => {
 				let bytes = 0;
@@ -214,7 +250,7 @@ for (;;) {
 	}
 	if (!selectedModel) break;
 
-	const benchmark = `
+	const benchmark = isMac ? `
 import json, os, time
 from mlx_lm import load, stream_generate
 
@@ -235,8 +271,61 @@ for prompt in prompts:
     if last_resp and last_resp.generation_tokens:
         ttft = (first - start) if first else 0
         print(json.dumps({"ttft": ttft, "tps": last_resp.generation_tps, "tokens": last_resp.generation_tokens}), flush=True)
+` : `
+import json, os, time, warnings
+warnings.filterwarnings("ignore")
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.streamers import BaseStreamer
+
+model_path = os.environ["MODEL_PATH"]
+device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype, low_cpu_mem_usage=True).to(device)
+
+class MetricStreamer(BaseStreamer):
+    def __init__(self, start):
+        self.start = start
+        self.first = None
+        self.last = start
+        self.count = 0
+        self.is_prompt = True
+    def put(self, value):
+        if self.is_prompt:
+            self.is_prompt = False
+            return
+        now = time.perf_counter()
+        if self.first is None: self.first = now
+        self.count += 1
+        self.last = now
+    def end(self): pass
+
+prompts = [
+    "Explain what RAM does in about 50 words.",
+    "Explain why the sky appears blue in about 50 words.",
+    "Give a simple three-step recipe for making tea.",
+    "Explain the difference between a CPU and a GPU in about 50 words.",
+    "Describe the water cycle in about 50 words."
+]
+for prompt in prompts:
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    start = time.perf_counter()
+    streamer = MetricStreamer(start)
+    model.generate(**inputs, streamer=streamer, max_new_tokens=128)
+    if streamer.count:
+        ttft = (streamer.first - start) if streamer.first else 0
+        gen_time = (streamer.last - streamer.first) if (streamer.first and streamer.last > streamer.first) else (streamer.last - start)
+        tps = streamer.count / gen_time if gen_time > 0 else 0
+        print(json.dumps({"ttft": ttft, "tps": tps, "tokens": streamer.count}), flush=True)
 `;
-	console.log(`\nRunning MLX benchmark for ${model.name}...`);
+
+	const engineName = isMac ? "MLX" : "Transformers";
+	console.log(`\nRunning ${engineName} benchmark for ${model.name}...`);
 	const test = spawnProc(python, ["-c", benchmark], {
 		env: { ...process.env, MODEL_PATH: selectedModel },
 		capture: true
@@ -244,15 +333,20 @@ for prompt in prompts:
 	const benchmarkSuccess = (await test.exited) === 0;
 	const output = test.getOutput();
 	if (benchmarkSuccess) {
-		const results = output.trim().split("\n").filter(Boolean).map(JSON.parse);
+		const results = output.trim().split("\n").map(l => {
+			try { return JSON.parse(l.trim()); } catch { return null; }
+		}).filter(Boolean);
 		if (results.length) {
 			const meanTps = results.reduce((s, r) => s + r.tps, 0) / results.length;
-			console.log("\n========== MLX TOKEN TEST ==========");
+			console.log(`\n========== ${engineName.toUpperCase()} TOKEN TEST ==========`);
 			results.forEach((r, i) => console.log(`${i + 1}. TTFT: ${(r.ttft * 1000).toFixed(0)} ms | Tok/s: ${r.tps.toFixed(2)} | Tokens: ${r.tokens}`));
 			console.log(`Mean TTFT: ${(results.reduce((s, r) => s + r.ttft, 0) / results.length * 1000).toFixed(0)} ms | Mean Tok/s: ${meanTps.toFixed(2)}`);
 			console.log("=====================================");
 			if (/^y(es)?$/i.test(await ask(`Show how fast ${meanTps.toFixed(1)} tok/s looks like? [y/N] `) ?? "")) {
-				const words = "Artificial intelligence and large language models process text by predicting the next token in a sequence. With Apple Silicon unified memory architecture, weights are streamed with high bandwidth directly to the GPU cores. ".repeat(5).match(/\s*\S+/g);
+				const demoText = isMac
+					? "Artificial intelligence and large language models process text by predicting the next token in a sequence. With Apple Silicon unified memory architecture, weights are streamed with high bandwidth directly to the GPU cores. "
+					: "Artificial intelligence and large language models process text by predicting the next token in a sequence. Weights and activations are streamed with high bandwidth directly to the compute cores for fast token generation. ";
+				const words = demoText.repeat(5).match(/\s*\S+/g);
 				const demoStart = performance.now();
 				for (let i = 0; performance.now() - demoStart < 4000; i++) {
 					process.stdout.write(words[i % words.length]);
