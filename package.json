@@ -1,7 +1,7 @@
 {
   "name": "llm-sizer",
-  "version": "0.1.1",
-  "description": "Benchmark memory bandwidth, disk speed, and LLM inference performance (MLX on macOS, Transformers on Linux) to find the optimal model size",
+  "version": "0.1.2",
+  "description": "Benchmark memory bandwidth, disk speed, and LLM inference performance (MLX on macOS, Ollama on Linux) to find the optimal model size",
   "type": "module",
   "main": "llm-sizer.js",
   "bin": {
@@ -17,7 +17,7 @@
   },
   "keywords": [
     "mlx",
-    "transformers",
+    "ollama",
     "benchmark",
     "apple-silicon",
     "llm",
