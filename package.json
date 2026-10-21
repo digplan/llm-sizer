@@ -1,6 +1,6 @@
 {
   "name": "llm-sizer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Benchmark memory bandwidth, disk speed, and LLM inference performance (MLX on macOS, Ollama on Linux) to find the optimal model size",
   "type": "module",
   "main": "llm-sizer.js",
