@@ -59,6 +59,7 @@ let ollamaBin = existsSync(`${projectBinDir}/ollama`) ? `${projectBinDir}/ollama
 
 const backendName = isMac ? "mlx-lm" : "Ollama";
 let backendInstalled = false;
+let hasPython = Boolean(python || systemPython);
 
 const isOllamaRunning = async () => {
 	try {
@@ -96,7 +97,7 @@ if (isMac) {
 	if (python) {
 		backendInstalled = (await spawnProc(python, ["-c", "import mlx_lm"], { stdio: "ignore" }).exited) === 0;
 	}
-	const hasPython = Boolean(python || systemPython);
+	hasPython = Boolean(python || systemPython);
 	if (!backendInstalled && hasPython && /^y(es)?$/i.test(await ask(`mlx-lm is not installed. Install mlx-lm in virtual environment (${venvDir})? [y/N] `) ?? "")) {
 		if (!python) {
 			console.log(`\nCreating virtual environment in ${venvDir}...`);
